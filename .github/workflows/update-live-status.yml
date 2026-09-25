@@ -1,0 +1,90 @@
+name: Atualizar status das lives
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o site
+        uses: actions/checkout@v4
+
+      - name: Instalar yt-dlp
+        run: python -m pip install --upgrade yt-dlp
+
+      - name: Detectar live atual no YouTube
+        id: detect
+        shell: bash
+        run: |
+          python <<'PY'
+          import json, subprocess, re
+          from datetime import datetime, timezone
+
+          channel_live = "https://www.youtube.com/@lmreicaryt/live"
+          result = {
+              "updatedAt": datetime.now(timezone.utc).isoformat(),
+              "channel": "https://www.youtube.com/@lmreicaryt",
+              "live": False,
+              "game": None,
+              "title": None,
+              "videoId": None
+          }
+
+          def run(cmd):
+              p = subprocess.run(cmd, text=True, capture_output=True)
+              return p.returncode, p.stdout, p.stderr
+
+          # The /live tab normally exposes the current live broadcast first.
+          code, out, err = run([
+              "yt-dlp", "--flat-playlist", "--playlist-items", "1",
+              "--print", "%(id)s|%(title)s", channel_live
+          ])
+
+          if code == 0 and out.strip():
+              first = out.strip().splitlines()[0]
+              parts = first.split("|", 1)
+              video_id = parts[0].strip()
+              fallback_title = parts[1].strip() if len(parts) > 1 else ""
+
+              # Ask yt-dlp for the broadcast's actual live_status.
+              code2, raw, _ = run(["yt-dlp", "-J", "--skip-download", f"https://www.youtube.com/watch?v={video_id}"])
+              if code2 == 0 and raw.strip():
+                  try:
+                      info = json.loads(raw)
+                      live_status = str(info.get("live_status") or "").lower()
+                      is_live = live_status == "is_live" or bool(info.get("is_live"))
+                      title = info.get("title") or fallback_title
+                      result["live"] = is_live
+                      result["title"] = title
+                      result["videoId"] = video_id if is_live else None
+
+                      if is_live:
+                          text = (title + " " + " ".join(info.get("categories") or []) + " " + " ".join(info.get("tags") or [])).lower()
+                          if re.search(r"\b(roblox|blox fruits|brookhaven|murder mystery|doors|bedwars)\b", text):
+                              result["game"] = "roblox"
+                          elif re.search(r"\b(efootball|e-football|efootball 2026|pes 2026|pes)\b", text):
+                              result["game"] = "efootball"
+                          elif re.search(r"\b(fivem|five m|gta rp|gta roleplay|roleplay|cidade)\b", text):
+                              result["game"] = "fivem"
+                  except Exception:
+                      pass
+
+          with open("live-status.json", "w", encoding="utf-8") as f:
+              json.dump(result, f, ensure_ascii=False, indent=2)
+          print(json.dumps(result, ensure_ascii=False))
+          PY
+
+      - name: Publicar novo status
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add live-status.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Atualizar status da live"
+          git push
